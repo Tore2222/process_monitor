@@ -15,43 +15,36 @@ pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*lay total memory tu /proc/meminfo*/ 
 unsigned long get_total_memory() {
-    FILE *fp = fopen("/proc/meminfo", "r");
     char line[256];
     unsigned long mem_total = 0;
-
+    FILE *fp = fopen("/proc/meminfo", "r");
     if (fp == NULL) {
         perror("Error opening /proc/meminfo");
         return 0;
-    }
-
+    }    
     while (fgets(line, sizeof(line), fp)) {
         /*tim toi phan MemoTotal*/
         if (sscanf(line, "MemTotal: %lu kB", &mem_total) == 1) {
             break;
         }
     }
-
     fclose(fp);
     return mem_total;
 }
 
-/*get process stats from /proc/[pid]/stat*/
+/*lay data tu /proc/[pid]/stat*/
 void get_process_stat(int pid, unsigned long *utime, unsigned long *stime, long *rss) {
     char path[64];
     FILE *fp;
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
     fp = fopen(path, "r");
-    
     if (fp == NULL) {
         printf("PID : %d\n",pid);
         perror("Error opening /proc/[pid]/stat");
         return;
     }
-
-    // 
     fscanf(fp, "%*d %*s %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*ld %*ld %*ld %*ld %*ld %*ld %*llu %*llu %ld",
            utime, stime, rss);
-
     fclose(fp);
 }
 
@@ -65,6 +58,11 @@ typedef struct {
 // Ham kiem tra process
 void* monitor_process(void *arg) {
     thread_arg_t *args = (thread_arg_t*)arg;
+    if (args == NULL) {
+        perror("Invalid argument passed to thread");
+        return NULL;
+    }
+
     int pid = args->pid;
     unsigned long total_memory = args->total_memory;
     long ticks_per_second = args->ticks_per_second;
@@ -100,32 +98,32 @@ void* monitor_process(void *arg) {
 
                     /*check xem da co pid do trong file chua*/
                     FILE *file = fopen("process_monitor.log", "r");
-                    int pid_found = 0;
-                    if (file != NULL) {
+                    if (file == NULL) {
+                        perror("Error opening log file for reading");
+                    } else {
                         char line[256];
+                        int pid_found = 0;
                         while (fgets(line, sizeof(line), file)) {
                             int logged_pid;
-                            sscanf(line, "PID: %d,", &logged_pid);
-                            if (logged_pid == pid) {
+                            if (sscanf(line, "PID: %d,", &logged_pid) == 1 && logged_pid == pid) {
                                 pid_found = 1;
                                 break;
                             }
                         }
                         fclose(file);
-                    }
 
-                    // Neu khong co
-                    if (!pid_found) {
-                        file = fopen("process_monitor.log", "a");
-                        if (file != NULL) {
-                            fprintf(file, "PID: %d, CPU Usage: %.2f%%, Memory Usage: %.2f%%\n", pid, cpu_usage, memory_usage);
-                            fclose(file);
-                        } else {
-                            perror("Error opening log file");
+                        // Nếu không có
+                        if (!pid_found) {
+                            file = fopen("process_monitor.log", "a");
+                            if (file == NULL) {
+                                perror("Error opening log file for appending");
+                            } else {
+                                fprintf(file, "PID: %d, CPU Usage: %.2f%%, Memory Usage: %.2f%%\n", pid, cpu_usage, memory_usage);
+                                fclose(file);
+                            }
                         }
                     }
-
-                    // Unlock the file
+                    // Unlock
                     pthread_mutex_unlock(&file_mutex);
                 }
 
@@ -137,7 +135,7 @@ void* monitor_process(void *arg) {
         prev_utime = utime;
         prev_stime = stime;
 
-        sleep(1); // Sleep for 1 second and then check the time again
+        sleep(1); // 
         if (count >= 20) break;
     }
 
@@ -227,15 +225,14 @@ void restart_process() {
             if (len != -1) {
                 real_exe_path[len] = '\0'; // Null-terminate the path
 
-                // Send a termination signal to the process
+                // kill
                 if (kill(pid, SIGTERM) == 0) {
-                    // Wait for the process to terminate
+                    
                     sleep(1);
-
-                    // Restart the process using the executable path
+                    // Restart the process 
                     printf("Restarting process PID: %d with executable: %s\n", pid, real_exe_path);
                     if (fork() == 0) { // Fork a new process
-                        execl(real_exe_path, real_exe_path, (char *)NULL); // Execute the program
+                        execl(real_exe_path, real_exe_path, (char *)NULL); 
                         perror("Error restarting process");
                         exit(1); // Exit child process if exec fails
                     }
@@ -254,8 +251,8 @@ void restart_process() {
 int main() {
     DIR *dir;
     struct dirent *ent;
-    unsigned long total_memory = get_total_memory(); // Lấy tổng bộ nhớ tính bằng KB
-    long ticks_per_second = sysconf(_SC_CLK_TCK); // Lấy số ticks hệ thống mỗi giây
+    unsigned long total_memory = get_total_memory(); // KB
+    long ticks_per_second = sysconf(_SC_CLK_TCK); //ticks sys /giây
 
     while (1) {
         FILE *file = fopen("process_monitor.log", "w");
@@ -273,7 +270,6 @@ int main() {
                 {
                     int pid = atoi(ent->d_name);
 
-                    // Tạo bản sao của đối số luồng cho từng PID
                     thread_arg_t *args = malloc(sizeof(thread_arg_t));
                     if (args == NULL) 
                     {
