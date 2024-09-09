@@ -10,6 +10,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <signal.h> 
+#include <string.h>
+#include <time.h>
+#include <signal.h>
 // Mutex
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -51,6 +54,8 @@ void get_process_stat(int pid, unsigned long *utime, unsigned long *stime, long 
 // Struct de truyen vao thread xu ly
 typedef struct {
     int pid;
+    char name[50];
+    int cpu_min, cpu_max, mem_min, mem_max;
     unsigned long total_memory;
     long ticks_per_second;
 } thread_arg_t;
@@ -64,6 +69,12 @@ void* monitor_process(void *arg) {
     }
 
     int pid = args->pid;
+    char name[50];
+    strcpy(name, args->name); // Sao chép tên
+    int cpu_min = args->cpu_min;
+    int cpu_max = args->cpu_max;
+    int mem_min = args->mem_min;
+    int mem_max = args->mem_max;
     unsigned long total_memory = args->total_memory;
     long ticks_per_second = args->ticks_per_second;
 
@@ -76,6 +87,7 @@ void* monitor_process(void *arg) {
     time(&current_time);
     next_write_time = current_time + 5; // sau 5s
     int count = 0;
+    int check = 0;
 
     while (1) {
         count++;
@@ -92,53 +104,55 @@ void* monitor_process(void *arg) {
 
             time(&current_time);
             if (current_time >= next_write_time) {
-                if (cpu_usage >= 90.0 || memory_usage >= 20.0) {
-                    /*lock file*/
-                    pthread_mutex_lock(&file_mutex);
+                if (cpu_usage >= cpu_max || memory_usage >= mem_max) {
+                    check++;  
+                    printf("\n Alarm 3 time will print to the File\n");   
+                    if(check >=3){
+                        pthread_mutex_lock(&file_mutex);
+                        printf("PID : %d saved to the file\n",pid);
+                        /*check xem da co pid do trong file chua*/
+                        FILE *file = fopen("process_monitor.log", "r");
+                        if (file == NULL) {
+                            perror("Error opening log file for reading");
+                        } else {
+                            char line[256];
+                            int pid_found = 0;
+                            while (fgets(line, sizeof(line), file)) {
+                                int logged_pid;
+                                if (sscanf(line, "PID: %d,", &logged_pid) == 1 && logged_pid == pid) {
+                                    pid_found = 1;
+                                    break;
+                                }
+                            }
+                            fclose(file);
 
-                    /*check xem da co pid do trong file chua*/
-                    FILE *file = fopen("process_monitor.log", "r");
-                    if (file == NULL) {
-                        perror("Error opening log file for reading");
-                    } else {
-                        char line[256];
-                        int pid_found = 0;
-                        while (fgets(line, sizeof(line), file)) {
-                            int logged_pid;
-                            if (sscanf(line, "PID: %d,", &logged_pid) == 1 && logged_pid == pid) {
-                                pid_found = 1;
-                                break;
+                            // Nếu không có
+                            if (!pid_found) {
+                                file = fopen("process_monitor.log", "a");
+                                if (file == NULL) {
+                                    perror("Error opening log file for appending");
+                                } else {
+                                    fprintf(file, "PID: %d, CPU Usage: %.2f%%, Memory Usage: %.2f%%, Name: %s\n", pid, cpu_usage, memory_usage, name);
+                                    fclose(file);
+                                }
                             }
                         }
-                        fclose(file);
-
-                        // Nếu không có
-                        if (!pid_found) {
-                            file = fopen("process_monitor.log", "a");
-                            if (file == NULL) {
-                                perror("Error opening log file for appending");
-                            } else {
-                                fprintf(file, "PID: %d, CPU Usage: %.2f%%, Memory Usage: %.2f%%\n", pid, cpu_usage, memory_usage);
-                                fclose(file);
-                            }
-                        }
-                    }
-                    // Unlock
-                    pthread_mutex_unlock(&file_mutex);
+                        // Unlock
+                        pthread_mutex_unlock(&file_mutex);
+                    } 
                 }
 
                 // Update the next write time
-                next_write_time = current_time + 5;
+                next_write_time = current_time + 3;
             }
         }
 
         prev_utime = utime;
         prev_stime = stime;
-
         sleep(1); // 
         if (count >= 20) break;
     }
-
+    free(args);
     return NULL;
 }
 void send_file_to_server(const char *file_path) {
@@ -247,6 +261,54 @@ void restart_process() {
 
     fclose(file);
 }
+int find_process(const char name[50]) {
+    DIR *dir;
+    struct dirent *ent;
+    int found_pid = 0;  // Variable to store the found PID
+
+    // Open the /proc directory
+    if ((dir = opendir("/proc")) != NULL) {
+        // Iterate through directory entries
+        while ((ent = readdir(dir)) != NULL) {
+            char path[256];
+            char cmd_name[256];
+
+            // Check if the entry name is a number (PID)
+            if (isdigit(*ent->d_name)) {
+                int pid = atoi(ent->d_name);
+                // Create path to the /proc/[PID]/comm file
+                snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+
+                // Open the /proc/[PID]/comm file
+                FILE *cmd_file = fopen(path, "r");
+                if (cmd_file != NULL) {
+                    // Read the process name
+                    if (fgets(cmd_name, sizeof(cmd_name), cmd_file) != NULL) {
+                        // Remove newline character from the end
+                        cmd_name[strcspn(cmd_name, "\n")] = 0;
+                        // Compare the process name with the provided name
+                        if (strcmp(cmd_name, name) == 0) {
+                            found_pid = pid;  // Store the found PID
+                            fclose(cmd_file); // Close the file
+                            break;           // Exit the loop once found
+                        }
+                    } else {
+                        perror("Lỗi khi đọc tên tiến trình");
+                    }
+                    fclose(cmd_file); // Ensure file is closed
+                } else {
+                    perror("Lỗi khi mở tệp /proc/[PID]/comm");
+                }
+            }
+        }
+        closedir(dir); // Close the directory after processing all entries
+    } else {
+        perror("Lỗi khi mở thư mục /proc");
+    }
+
+    return found_pid; // Return the found PID or 0 if not found
+}
+
 
 int main() {
     DIR *dir;
@@ -261,53 +323,77 @@ int main() {
         }
         pthread_t threads[1024]; // Mảng lưu trữ ID luồng
         int thread_count = 0; // Đếm số lượng luồng
-
-        if ((dir = opendir("/proc")) != NULL) 
-        {
-            while ((ent = readdir(dir)) != NULL) 
-            {
-                if (isdigit(*ent->d_name)) 
-                {
-                    int pid = atoi(ent->d_name);
-
-                    thread_arg_t *args = malloc(sizeof(thread_arg_t));
-                    if (args == NULL) 
-                    {
-                        perror("Không thể cấp phát bộ nhớ cho args");
-                        continue;
-                    }
-                    args->pid = pid;
-                    args->total_memory = total_memory;
-                    args->ticks_per_second = ticks_per_second;
-
-                    // Tạo luồng và truyền bản sao args
-                    pthread_create(&threads[thread_count], NULL, monitor_process, (void*)args);
-                    //printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
-                    thread_count++;
-                }
-               
-            }
-             printf("############################");
-            closedir(dir);
-        } else 
-        {
-            perror("Lỗi khi mở thư mục /proc");
+         // Mở file để đọc
+        char line[256];   // Mảng để chứa từng dòng đọc từ file 
+        FILE *file1 = fopen("input.txt", "r");
+        if (file1 == NULL) {
+            printf("Không thể mở file!\n");
             return 1;
         }
-
+        while (fgets(line, sizeof(line), file1)) 
+        {   
+            char name[50];    // Mảng để chứa tên process
+            int cpu_min, cpu_max, mem_min, mem_max;
+            if (sscanf(line, "NAME: %[^,], CPU Usage: %d%%-%d%%, Memory Usage: %d%%-%d%%", 
+                   name, &cpu_min, &cpu_max, &mem_min, &mem_max) != 5) 
+            {
+                printf("Lỗi khi đọc dòng: %s\n", line);
+            }
+            else
+            {   
+                printf("Tên: %s\n", name);
+                printf("Sử dụng CPU: %d%% - %d%%\n", cpu_min, cpu_max);
+                printf("Sử dụng bộ nhớ: %d%% - %d%%\n", mem_min, mem_max);
+                printf("@@@@@@@!");
+                if (find_process(name) == 0) {
+                    if (fork() == 0) {
+                        // Tiến trình con: Tạo đường dẫn đầy đủ cho chương trình
+                        char program_path[256];
+                        snprintf(program_path, sizeof(program_path), "./%s", name);
+                        
+                        // Chạy chương trình
+                        execlp(program_path, program_path, NULL);
+                        perror("Chạy chương trình thất bại");
+                        exit(1);
+                    }
+                }
+                int pid =find_process(name);
+                printf("PID = %d",pid);
+                //int pid=5440;
+                printf("@@@@@@@\n");
+                thread_arg_t *args = malloc(sizeof(thread_arg_t));
+                if (args == NULL) 
+                {
+                    perror("Không thể cấp phát bộ nhớ cho args");
+                    continue;
+                }
+                args->pid = pid;
+                strcpy(args->name,name);
+                args->cpu_min = cpu_min;
+                args->cpu_max = cpu_max;
+                args->mem_min = mem_min;
+                args->mem_max = mem_max;
+                args->total_memory = total_memory;
+                args->ticks_per_second = ticks_per_second;
+                pthread_create(&threads[thread_count], NULL, monitor_process, (void*)args);
+                //printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                thread_count++;
+            }
+        }
+        fclose(file1);
         // Chờ tất cả các luồng hoàn thành
         for (int i = 0; i < thread_count; i++) 
         {
             pthread_join(threads[i], NULL);
         }
-        printf("@@@@@@@@@@@@@@@@@@@@@@@@@ %d",thread_count);
+        printf("\n Numthread:  %d\n",thread_count);
 
         if(get_file_size("process_monitor.log"))
         {
             send_file_to_server("process_monitor.log");
             restart_process();
         }
-        
+        break;
         
         sleep(1);
     }
