@@ -1,3 +1,3 @@
-NAME: while, CPU Usage: 90%-100%, Memory Usage: 10%-20%
-NAME: while1, CPU Usage: 90%-100%, Memory Usage: 10%-20%
-NAME: deamonprocess, CPU Usage: 90%-100%, Memory Usage: 10%-20%
+NAME: while, CPU Usage: 90%-95%, Memory Usage: 10%-20%
+NAME: while1, CPU Usage: 90%-95%, Memory Usage: 10%-20%
+NAME: deamonprocess, CPU Usage: 90%-95%, Memory Usage: 10%-20%

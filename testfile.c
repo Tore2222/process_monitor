@@ -15,6 +15,36 @@
 #include <signal.h>
 // Mutex
 pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+//
+#define SERVER_IP "127.0.0.1"
+#define SERVER_PORT 6789
+#define BUFFER_SIZE 1024
+
+typedef struct {
+    uint8_t start_byte;
+    uint8_t message_type;
+    uint32_t offset;
+    uint32_t data_size;  // Kích thước thực sự của dữ liệu
+    char data[BUFFER_SIZE];
+    uint32_t checksum;
+    uint8_t end_byte;
+} Packet;
+
+uint32_t calculate_checksum(char *data, int length) {
+    uint32_t checksum = 0;
+    for (int i = 0; i < length; i++) {
+        checksum += (uint8_t)data[i];
+    }
+    return checksum;
+}
+// Struct de truyen vao thread xu ly
+typedef struct {
+    int pid;
+    char name[50];
+    int cpu_min, cpu_max, mem_min, mem_max;
+    unsigned long total_memory;
+    long ticks_per_second;
+} thread_arg_t;
 
 /*lay total memory tu /proc/meminfo*/ 
 unsigned long get_total_memory() {
@@ -50,15 +80,6 @@ void get_process_stat(int pid, unsigned long *utime, unsigned long *stime, long 
            utime, stime, rss);
     fclose(fp);
 }
-
-// Struct de truyen vao thread xu ly
-typedef struct {
-    int pid;
-    char name[50];
-    int cpu_min, cpu_max, mem_min, mem_max;
-    unsigned long total_memory;
-    long ticks_per_second;
-} thread_arg_t;
 
 // Ham kiem tra process
 void* monitor_process(void *arg) {
@@ -155,40 +176,36 @@ void* monitor_process(void *arg) {
     free(args);
     return NULL;
 }
-void send_file_to_server(const char *file_path) {
+
+
+void send_file_to_server(const char *file_path, const char *server_ip, int server_port) {
     int sockfd;
     struct sockaddr_in server_addr;
-    char buffer[1024];
+    Packet packet;
     FILE *file;
+    int bytes_read;
+    uint32_t offset = 0;
 
     // Tạo socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        perror("Không thể tạo socket");
-        return;
+        perror("Lỗi tạo socket");
+        exit(EXIT_FAILURE);
     }
 
-    // Cấu hình server address
+    // Cấu hình địa chỉ server
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(6789);
-    inet_pton(AF_INET, "127.0.0.1", &server_addr.sin_addr);
+    server_addr.sin_port = htons(server_port);
+    inet_pton(AF_INET, server_ip, &server_addr.sin_addr);
 
-    // Kết nối đến server
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Không thể kết nối đến server");
+    // Kết nối tới server
+    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Lỗi kết nối tới server");
         close(sockfd);
-        return;
+        exit(EXIT_FAILURE);
     }
 
-    // Mở file và gửi nội dung
-    file = fopen(file_path, "rb");
-    if (file == NULL) {
-        perror("Không thể mở file để gửi");
-        close(sockfd);
-        return;
-    }
-
-    // Gửi dòng đầu tiên là thời gian hiện tại
+     // Gửi dòng đầu tiên là thời gian hiện tại
     time_t now = time(NULL);
     struct tm *timeinfo = localtime(&now);
     char time_str[256];
@@ -197,19 +214,41 @@ void send_file_to_server(const char *file_path) {
     {
         perror("Lỗi gửi thời gian");
     }
-    sleep(2);
-    // Gửi nội dung file
-    size_t bytes_read;
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        if (send(sockfd, buffer, bytes_read, 0) < 0) {
-            perror("Lỗi gửi dữ liệu file");
+    // Mở file để đọc
+    file = fopen(file_path, "rb");
+    if (file == NULL) {
+        perror("Lỗi mở file");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Đọc và gửi từng phần của file
+    while ((bytes_read = fread(packet.data, 1, BUFFER_SIZE, file)) > 0) {
+        packet.start_byte = 0x02;
+        packet.message_type = 0x02; // Dữ liệu
+        packet.offset = offset;
+        packet.data_size = bytes_read;  // Ghi kích thước thực của dữ liệu
+        packet.checksum = calculate_checksum(packet.data, bytes_read);
+        packet.end_byte = 0x03;
+
+        // Gửi gói tin tới server
+        if (send(sockfd, &packet, sizeof(Packet), 0) < 0) {
+            perror("Lỗi gửi dữ liệu");
             break;
         }
+
+        offset += bytes_read;
+    }
+
+    if (ferror(file)) {
+        perror("Lỗi đọc file");
     }
 
     fclose(file);
     close(sockfd);
+    printf("Đã gửi file %s tới server\n", file_path);
 }
+
 long get_file_size(const char *file_path) {
     FILE *file = fopen(file_path, "r");
     if (file == NULL) {
@@ -315,7 +354,7 @@ int main() {
     struct dirent *ent;
     unsigned long total_memory = get_total_memory(); // KB
     long ticks_per_second = sysconf(_SC_CLK_TCK); //ticks sys /giây
-
+   
     while (1) {
         FILE *file = fopen("process_monitor.log", "w");
         if (file != NULL) {
@@ -390,7 +429,7 @@ int main() {
 
         if(get_file_size("process_monitor.log"))
         {
-            send_file_to_server("process_monitor.log");
+            send_file_to_server("process_monitor.log",SERVER_IP, SERVER_PORT);
             restart_process();
         }
         break;

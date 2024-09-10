@@ -3,16 +3,36 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <stdint.h>
 
 #define PORT 6789
 #define BUFFER_SIZE 1024
 
+typedef struct {
+    uint8_t start_byte;
+    uint8_t message_type;
+    uint32_t offset;
+    uint32_t data_size;  // Kích thước thực sự của dữ liệu
+    char data[BUFFER_SIZE];
+    uint32_t checksum;
+    uint8_t end_byte;
+} Packet;
+
+uint32_t calculate_checksum(char *data, int length) {
+    uint32_t checksum = 0;
+    for (int i = 0; i < length; i++) {
+        checksum += (uint8_t)data[i];
+    }
+    return checksum;
+}
+
 void save_received_file(int client_socket) {
-    char buffer[BUFFER_SIZE];
+    Packet packet;
     int bytes_received;
-    FILE *received_file;
+    FILE *received_file = NULL;
     char file_name[256];
-    
+    uint32_t expected_offset = 0;
+
     // Nhận tên file từ client
     bytes_received = recv(client_socket, file_name, sizeof(file_name), 0);
     if (bytes_received <= 0) {
@@ -28,9 +48,31 @@ void save_received_file(int client_socket) {
         return;
     }
 
-    // Nhận dữ liệu file từ client và ghi vào file
-    while ((bytes_received = recv(client_socket, buffer, BUFFER_SIZE, 0)) > 0) {
-        fwrite(buffer, sizeof(char), bytes_received, received_file);
+    // Nhận các packet từ client
+    while ((bytes_received = recv(client_socket, &packet, sizeof(Packet), 0)) > 0) {
+        // Kiểm tra Start byte và End byte
+        if (packet.start_byte != 0x02 || packet.end_byte != 0x03) {
+            printf("Lỗi bản tin: Start/End byte không hợp lệ\n");
+            continue;
+        }
+
+        // Kiểm tra checksum
+        uint32_t received_checksum = packet.checksum;
+        uint32_t calculated_checksum = calculate_checksum(packet.data, packet.data_size);
+        if (received_checksum != calculated_checksum) {
+            printf("Lỗi: Checksum không khớp\n");
+            continue;
+        }
+
+        // Kiểm tra offset
+        if (packet.offset != expected_offset) {
+            printf("Lỗi: Offset không đúng (expected: %d, received: %d)\n", expected_offset, packet.offset);
+            continue;
+        }
+
+        // Ghi dữ liệu vào file (chỉ ghi đúng số lượng byte nhận được)
+        fwrite(packet.data, sizeof(char), packet.data_size, received_file);
+        expected_offset += packet.data_size;
     }
 
     if (bytes_received < 0) {
